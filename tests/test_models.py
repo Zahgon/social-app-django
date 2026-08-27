@@ -1,199 +1,198 @@
 from datetime import timedelta
 from unittest import mock
 
-from django.contrib.auth import get_user_model
-from django.core.management import call_command
-from django.db import IntegrityError
-from django.test import TestCase, override_settings
+import pytest
 from social_core.exceptions import AuthAlreadyAssociated
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from social_django.models import (
+from social_flask.clearsocial import clearsocial
+from social_flask.db import session as db_session
+from social_flask.models import (
     AbstractUserSocialAuth,
     Association,
     Code,
-    DjangoStorage,
+    FlaskStorage,
     Nonce,
     Partial,
+    User,
     UserSocialAuth,
 )
 
 
-class TestSocialAuthUser(TestCase):
+def count(model) -> int:
+    return db_session.query(model).count()
+
+
+def make_integrity_error() -> IntegrityError:
+    return IntegrityError("INSERT", (), Exception("duplicate"))
+
+
+@pytest.mark.usefixtures("app")
+class TestSocialAuthUser:
     def test_user_relationship_none(self):
         """Accessing User.social_user outside of the pipeline doesn't work"""
-        User = get_user_model()  # noqa: N806
-        user = User._default_manager.create_user(username="randomtester")  # noqa: SLF001
-        with self.assertRaises(AttributeError):
+        user = User.create_user(username="randomtester")
+        with pytest.raises(AttributeError):
             user.social_user  # noqa: B018
 
     def test_user_existing_relationship(self):
         """Accessing User.social_user outside of the pipeline doesn't work"""
-        User = get_user_model()  # noqa: N806
-        user = User._default_manager.create_user(username="randomtester")  # noqa: SLF001
-        UserSocialAuth.objects.create(user=user, provider="my-provider", uid="1234")
-        with self.assertRaises(AttributeError):
+        user = User.create_user(username="randomtester")
+        UserSocialAuth(user=user, provider="my-provider", uid="1234").save()
+        with pytest.raises(AttributeError):
             user.social_user  # noqa: B018
 
     def test_get_social_auth(self):
-        User = get_user_model()  # noqa: N806
-        user = User._default_manager.create_user(username="randomtester")  # noqa: SLF001
-        user_social = UserSocialAuth.objects.create(user=user, provider="my-provider", uid="1234")
+        user = User.create_user(username="randomtester")
+        user_social = UserSocialAuth(user=user, provider="my-provider", uid="1234").save()
         other = UserSocialAuth.get_social_auth("my-provider", "1234")
-        self.assertEqual(other, user_social)
+        assert other == user_social
 
     def test_get_social_auth_none(self):
         other = UserSocialAuth.get_social_auth("my-provider", "1234")
-        self.assertIsNone(other)
+        assert other is None
 
     def test_cleanup(self):
-        Code.objects.create(email="first@example.com")
-        Code.objects.create(email="second@example.com")
-        code = Code.objects.create(email="expire@example.com")
+        Code(email="first@example.com").save()
+        Code(email="second@example.com").save()
+        code = Code(email="expire@example.com").save()
         code.timestamp -= timedelta(days=30)
         code.save()
 
-        Partial.objects.create()
-        partial = Partial.objects.create()
+        Partial().save()
+        partial = Partial().save()
         partial.timestamp -= timedelta(days=30)
         partial.save()
 
-        call_command("clearsocial")
+        clearsocial()
 
-        self.assertEqual(2, Code.objects.count())
-        self.assertEqual(1, Partial.objects.count())
+        assert count(Code) == 2
+        assert count(Partial) == 1
 
 
-class TestUserSocialAuth(TestCase):
-    def setUp(self):
-        self.user_model = get_user_model()
-        self.user = self.user_model._default_manager.create_user(username="randomtester", email="user@example.com")  # noqa: SLF001
-        self.usa = UserSocialAuth.objects.create(user=self.user, provider="my-provider", uid="1234")
+class TestUserSocialAuth:
+    @pytest.fixture(autouse=True)
+    def _setup(self, app):
+        self.app = app
+        self.user_model = User
+        self.user = User.create_user(username="randomtester", email="user@example.com")
+        self.usa = UserSocialAuth(user=self.user, provider="my-provider", uid="1234").save()
 
     def test_changed(self):
         self.user.email = eml = "test@example.com"
         UserSocialAuth.changed(user=self.user)
-        db_eml = self.user_model._default_manager.get(username=self.user.username).email  # noqa: SLF001
-        self.assertEqual(db_eml, eml)
+        db_eml = db_session.scalars(select(self.user_model).filter_by(username=self.user.username)).one().email
+        assert db_eml == eml
 
     def test_set_extra_data(self):
         self.usa.set_extra_data({"a": "b"})
-        self.usa.refresh_from_db()
-        db_data = UserSocialAuth.objects.get(id=self.usa.id).extra_data
-        self.assertEqual(db_data, {"a": "b"})
+        db_session.expire(self.usa)
+        db_data = db_session.get(UserSocialAuth, self.usa.id).extra_data
+        assert db_data == {"a": "b"}
 
     def test_disconnect(self):
         m = mock.Mock()
         UserSocialAuth.disconnect(m)
-        self.assertListEqual(m.method_calls, [mock.call.delete()])
+        assert m.method_calls == [mock.call.delete()]
 
     def test_username_field(self):
-        self.assertEqual(UserSocialAuth.username_field(), "username")
+        assert UserSocialAuth.username_field() == "username"
         with mock.patch(
-            "social_django.models.UserSocialAuth.user_model",
+            "social_flask.models.UserSocialAuth.user_model",
             return_value=mock.Mock(USERNAME_FIELD="test"),
         ):
-            self.assertEqual(UserSocialAuth.username_field(), "test")
+            assert UserSocialAuth.username_field() == "test"
 
     def test_user_exists(self):
-        self.assertTrue(UserSocialAuth.user_exists(username=self.user.username))
-        self.assertFalse(UserSocialAuth.user_exists(username="test"))
+        assert UserSocialAuth.user_exists(username=self.user.username) is True
+        assert UserSocialAuth.user_exists(username="test") is False
 
     def test_get_username(self):
-        self.assertEqual(UserSocialAuth.get_username(self.user), self.user.username)
+        assert UserSocialAuth.get_username(self.user) == self.user.username
 
     def test_create_user(self):
         UserSocialAuth.create_user(username="testuser")
 
     def test_create_user_reraise(self):
-        with self.assertRaises(AuthAlreadyAssociated):
+        with pytest.raises(AuthAlreadyAssociated):
             UserSocialAuth.create_user(username=self.user.username, email=None)
 
-    @mock.patch("social_django.models.UserSocialAuth.username_field", return_value="email")
-    @mock.patch("django.contrib.auth.models.UserManager.create_user", return_value="<User>")
+    @mock.patch("social_flask.models.UserSocialAuth.username_field", return_value="email")
+    @mock.patch("social_flask.models.User.create_user", return_value="<User>")
     def test_create_user_custom_username(self, *args):
         UserSocialAuth.create_user(username=self.user.email)
 
-    @mock.patch("django.contrib.auth.models.UserManager.create_user", side_effect=IntegrityError)
+    @mock.patch("social_flask.models.User.create_user", side_effect=make_integrity_error())
     def test_create_user_existing(self, *args):
-        with self.assertRaises(AuthAlreadyAssociated):
+        with pytest.raises(AuthAlreadyAssociated):
             UserSocialAuth.create_user(username=self.user.email)
 
     def test_get_user(self):
-        self.assertEqual(UserSocialAuth.get_user(pk=self.user.pk), self.user)
-        self.assertIsNone(UserSocialAuth.get_user(pk=123))
+        assert UserSocialAuth.get_user(pk=self.user.id) == self.user
+        assert UserSocialAuth.get_user(pk=123) is None
 
     def test_get_users_by_email(self):
         qs = UserSocialAuth.get_users_by_email(email=self.user.email)
-        self.assertEqual(qs.count(), 1)
+        assert qs.count() == 1
         self.user.is_active = False
         self.user.save()
         qs = UserSocialAuth.get_users_by_email(email=self.user.email)
-        self.assertEqual(qs.count(), 0)
-        with override_settings(SOCIAL_AUTH_ACTIVE_USERS_FILTER={}):
+        assert qs.count() == 0
+        self.app.config["SOCIAL_AUTH_ACTIVE_USERS_FILTER"] = {}
+        try:
             qs = UserSocialAuth.get_users_by_email(email=self.user.email)
-            self.assertEqual(qs.count(), 1)
+            assert qs.count() == 1
+        finally:
+            del self.app.config["SOCIAL_AUTH_ACTIVE_USERS_FILTER"]
 
     def test_get_social_auth(self):
         usa = self.usa
         # Model
-        self.assertEqual(UserSocialAuth.get_social_auth(provider=usa.provider, uid=usa.uid), usa)
-        self.assertIsNone(UserSocialAuth.get_social_auth(provider="a", uid="1"))
+        assert UserSocialAuth.get_social_auth(provider=usa.provider, uid=usa.uid) == usa
+        assert UserSocialAuth.get_social_auth(provider="a", uid="1") is None
 
         # Mixin
-        self.assertEqual(
-            super(AbstractUserSocialAuth, usa).get_social_auth(provider=usa.provider, uid=usa.uid),
-            usa,
-        )
-        self.assertIsNone(super(AbstractUserSocialAuth, usa).get_social_auth(provider="a", uid="1"))
-
-        # Manager
-        self.assertEqual(
-            UserSocialAuth.objects.get_social_auth(provider=usa.provider, uid=usa.uid),
-            usa,
-        )
-        self.assertIsNone(UserSocialAuth.objects.get_social_auth(provider="a", uid="1"))
+        assert super(AbstractUserSocialAuth, usa).get_social_auth(provider=usa.provider, uid=usa.uid) == usa
+        assert super(AbstractUserSocialAuth, usa).get_social_auth(provider="a", uid="1") is None
 
     def test_get_social_auth_int_uid(self):
         usa = self.usa
         int_uid = int(usa.uid)
 
         # Model
-        self.assertEqual(UserSocialAuth.get_social_auth(provider=usa.provider, uid=int_uid), usa)
+        assert UserSocialAuth.get_social_auth(provider=usa.provider, uid=int_uid) == usa
 
         # Mixin
-        self.assertEqual(
-            super(AbstractUserSocialAuth, usa).get_social_auth(provider=usa.provider, uid=usa.uid),
-            usa,
-        )
+        assert super(AbstractUserSocialAuth, usa).get_social_auth(provider=usa.provider, uid=usa.uid) == usa
 
-        # Manager
-        self.assertEqual(
-            UserSocialAuth.get_social_auth(provider=usa.provider, uid=int_uid),
-            usa,
-        )
+        # Storage entry point
+        assert FlaskStorage.user.get_social_auth(provider=usa.provider, uid=int_uid) == usa
 
     def test_get_social_auth_for_user(self):
         qs = UserSocialAuth.get_social_auth_for_user(user=self.user, provider=self.usa.provider, id=self.usa.id)
-        self.assertEqual(qs.count(), 1)
+        assert qs.count() == 1
 
     def test_create_social_auth(self):
         usa = UserSocialAuth.create_social_auth(user=self.user, provider="test", uid=1)
-        self.assertEqual(usa.uid, "1")
-        self.assertEqual(str(usa), str(self.user))
+        assert usa.uid == "1"
+        assert str(usa) == str(self.user)
 
     def test_username_max_length(self):
-        self.assertEqual(UserSocialAuth.username_max_length(), 150)
+        assert UserSocialAuth.username_max_length() == 150
 
 
-class TestNonce(TestCase):
+@pytest.mark.usefixtures("app")
+class TestNonce:
     def test_use(self):
-        self.assertEqual(Nonce.objects.count(), 0)
-        self.assertTrue(Nonce.use(server_url="/", timestamp=1, salt="1"))
-        self.assertFalse(Nonce.use(server_url="/", timestamp=1, salt="1"))
-        self.assertEqual(Nonce.objects.count(), 1)
+        assert count(Nonce) == 0
+        assert Nonce.use(server_url="/", timestamp=1, salt="1") is True
+        assert Nonce.use(server_url="/", timestamp=1, salt="1") is False
+        assert count(Nonce) == 1
 
 
-class TestAssociation(TestCase):
+@pytest.mark.usefixtures("app")
+class TestAssociation:
     def test_store_get_remove(self):
         Association.store(
             server_url="/",
@@ -201,32 +200,34 @@ class TestAssociation(TestCase):
         )
 
         qs = Association.get(handle="a")
-        self.assertEqual(qs.count(), 1)
-        self.assertEqual(qs[0].secret, "Yg==\n")
+        assert qs.count() == 1
+        assert qs[0].secret == "Yg==\n"
 
         Association.remove(ids_to_delete=[qs.first().id])
-        self.assertEqual(Association.objects.count(), 0)
+        assert count(Association) == 0
 
 
-class TestCode(TestCase):
+@pytest.mark.usefixtures("app")
+class TestCode:
     def test_get_code(self):
-        code1 = Code.objects.create(email="test@example.com", code="abc")
+        code1 = Code(email="test@example.com", code="abc").save()
         code2 = Code.get_code(code="abc")
-        self.assertEqual(code1, code2)
-        self.assertIsNone(Code.get_code(code="xyz"))
+        assert code1 == code2
+        assert Code.get_code(code="xyz") is None
 
 
-class TestPartial(TestCase):
+@pytest.mark.usefixtures("app")
+class TestPartial:
     def test_load_destroy(self):
         token_value = "x"  # noqa: S105
-        p = Partial.objects.create(token=token_value, backend="y", data={})
-        self.assertEqual(Partial.load(token=token_value), p)
-        self.assertIsNone(Partial.load(token="y"))  # noqa: S106
+        p = Partial(token=token_value, backend="y", data={}).save()
+        assert Partial.load(token=token_value) == p
+        assert Partial.load(token="y") is None  # noqa: S106
 
         Partial.destroy(token=token_value)
-        self.assertEqual(Partial.objects.count(), 0)
+        assert count(Partial) == 0
 
 
-class TestDjangoStorage(TestCase):
+class TestFlaskStorage:
     def test_is_integrity_error(self):
-        self.assertTrue(DjangoStorage.is_integrity_error(IntegrityError()))
+        assert FlaskStorage.is_integrity_error(make_integrity_error()) is True

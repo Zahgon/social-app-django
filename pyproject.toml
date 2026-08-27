@@ -5,11 +5,10 @@ requires = ["setuptools>=78.0.2"]
 [dependency-groups]
 dev = [
   "coverage>=3.6",
-  "django-stubs-ext==6.0.9",
-  "django-stubs==6.0.9",
-  "mypy==2.3.1",
+  "mypy==2.3.0",
   "pre-commit",
   "pyright==1.1.411",
+  "pytest",
   "tox"
 ]
 
@@ -21,9 +20,7 @@ authors = [
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Web Environment",
-  "Framework :: Django :: 5.2",
-  "Framework :: Django :: 6.0",
-  "Framework :: Django",
+  "Framework :: Flask",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -35,15 +32,16 @@ classifiers = [
   "Topic :: Internet"
 ]
 dependencies = [
-  "asgiref>=3.8.1",
-  "Django>=5.2",
+  "Flask>=3.0",
+  "SQLAlchemy>=2.0",
+  "blinker",
   "social-auth-core>=5.0.0,<6.0.0"
 ]
-description = "Python Social Authentication, Django integration."
-keywords = ["django", "oauth", "openid", "saml", "social auth"]
+description = "Python Social Authentication, Flask integration."
+keywords = ["flask", "oauth", "openid", "saml", "social auth"]
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-name = "social-auth-app-django"
+name = "social-auth-app-flask"
 readme = "README.md"
 requires-python = ">=3.10"
 version = "6.0.1"
@@ -53,18 +51,17 @@ version = "6.0.1"
 # see https://github.com/pypa/pip/issues/12963
 dev = [
   "coverage>=3.6",
-  "django-stubs-ext==6.0.9",
-  "django-stubs==6.0.9",
-  "mypy==2.3.1",
+  "mypy==2.3.0",
   "pre-commit",
   "pyright==1.1.411",
+  "pytest",
   "tox"
 ]
 
 [project.urls]
-Changelog = "https://github.com/python-social-auth/social-app-django/blob/master/CHANGELOG.md"
+Changelog = "https://github.com/python-social-auth/social-app-flask/blob/master/CHANGELOG.md"
 Funding = "https://opencollective.com/python-social-auth"
-Homepage = "https://github.com/python-social-auth/social-app-django"
+Homepage = "https://github.com/python-social-auth/social-app-flask"
 
 [tool.check-manifest]
 ignore = [
@@ -74,20 +71,11 @@ ignore = [
   "tox.ini"
 ]
 
-[tool.check-wheel-contents]
-ignore = [
-  "W004"  # Django migrations fail here
-]
-
-[tool.django-stubs]
-django_settings_module = "tests.settings"
-strict_settings = false
-
 [tool.mypy]
 check_untyped_defs = true
-plugins = [
-  "mypy_django_plugin.main"
-]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.pyright]
 pythonVersion = "3.10"
@@ -121,10 +109,8 @@ ignore = [
   "D",  # TODO: Missing documentation
   "D203",  # CONFIG: incompatible with D211
   "D212",  # CONFIG: incompatible with D213
-  "DJ008",  # TODO: Model does not define `__str__` method
   "FBT002",  # TODO: Boolean default positional argument in function definition
   "FBT003",  # TODO: Boolean positional value in function call
-  "PT",  # CONFIG: Not using pytest
   "RUF012"  # TODO: ClassVar type annotations
 ]
 select = ["ALL"]
@@ -132,20 +118,11 @@ select = ["ALL"]
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
-[tool.ruff.lint.per-file-ignores]
-"social_django/migrations/*.py" = ["RUF012"]
-"tests/settings.py" = ["PTH"]
-
-[tool.rumdl]
-disable = [
-  # We do not enforce heading
-  "first-line-heading",
-  # Avoid length limit checks
-  "line-length"
-]
-
 [tool.setuptools]
-packages = ["social_django"]
+packages = ["social_flask"]
+
+[tool.setuptools.package-data]
+social_flask = ["py.typed", "templates/social_flask/*.html"]
 
 [tool.tomlsort]
 ignore_case = true

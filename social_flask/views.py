@@ -1,51 +1,78 @@
-from django.conf import settings
-from django.contrib.auth import REDIRECT_FIELD_NAME, login
-from django.contrib.auth.decorators import login_not_required, login_required
-from django.views.decorators.cache import never_cache
-from django.views.decorators.csrf import csrf_exempt, csrf_protect
-from django.views.decorators.http import require_POST
+from datetime import timedelta
+
+from flask import Blueprint, abort, current_app, g
+from flask import request as flask_request
+from flask import session as flask_session
 from social_core.actions import do_auth, do_complete, do_disconnect
-from social_core.utils import setting_name
 
-from .utils import psa
+from .utils import REDIRECT_FIELD_NAME, Storage, psa
 
-NAMESPACE = getattr(settings, setting_name("URL_NAMESPACE"), None) or "social"
+social_auth = Blueprint("social", __name__, template_folder="templates")
 
-# Calling `session.set_expiry(None)` results in a session lifetime equal to
-# platform default session lifetime.
+# Setting the session expiry to ``None`` results in a session lifetime equal to
+# the platform default session lifetime.
 DEFAULT_SESSION_TIMEOUT = None
 
-
-@never_cache
-@login_not_required
-@require_POST
-@psa(f"{NAMESPACE}:complete")
-def auth(request, backend):
-    return do_auth(request.backend, redirect_name=REDIRECT_FIELD_NAME)
+SESSION_USER_KEY = "_user_id"
 
 
-@never_cache
-@login_not_required
-@csrf_exempt
-@psa(f"{NAMESPACE}:complete")
-def complete(request, backend, *args, **kwargs):
+def login_user(user) -> None:
+    """Attach the given user to the current session."""
+    flask_session[SESSION_USER_KEY] = str(user.id)
+    flask_session.modified = True
+
+
+def get_current_user():
+    """Return the user attached to the current session, if any."""
+    user_id = flask_session.get(SESSION_USER_KEY)
+    if user_id is None:
+        return None
+    return Storage.user.get_user(pk=int(user_id))
+
+
+def set_session_expiry(session_expiry) -> None:
+    """Apply the computed session length to the current session."""
+    if session_expiry is None:
+        flask_session.permanent = False
+        return
+    current_app.permanent_session_lifetime = timedelta(seconds=session_expiry)
+    flask_session.permanent = True
+
+
+@social_auth.route("/login/<string:backend>", methods=["POST"], endpoint="begin")
+@psa("social.complete")
+def auth(backend):
+    return do_auth(g.backend, redirect_name=REDIRECT_FIELD_NAME)
+
+
+@social_auth.route("/complete/<string:backend>", methods=["GET", "POST"], endpoint="complete")
+@psa("social.complete")
+def complete(backend, *args, **kwargs):
     """Authentication complete view"""
-    kwargs.update(
-        user=request.user,
+    return do_complete(
+        g.backend,
+        _do_login,
+        user=get_current_user(),
         redirect_name=REDIRECT_FIELD_NAME,
-        request=request,
+        request=flask_request._get_current_object(),  # noqa: SLF001
+        *args,  # noqa: B026
+        **kwargs,
     )
-    return do_complete(request.backend, _do_login, *args, **kwargs)
 
 
-@never_cache
-@login_required
+@social_auth.route("/disconnect/<string:backend>", methods=["POST"], endpoint="disconnect")
+@social_auth.route(
+    "/disconnect/<string:backend>/<int:association_id>",
+    methods=["POST"],
+    endpoint="disconnect_individual",
+)
 @psa()
-@require_POST
-@csrf_protect
-def disconnect(request, backend, association_id=None):
+def disconnect(backend, association_id=None):
     """Disconnects given backend from current logged in user."""
-    return do_disconnect(request.backend, request.user, association_id, redirect_name=REDIRECT_FIELD_NAME)
+    user = get_current_user()
+    if user is None:
+        abort(401)
+    return do_disconnect(g.backend, user, association_id, redirect_name=REDIRECT_FIELD_NAME)
 
 
 def get_session_timeout(social_user, enable_session_expiration=False, max_session_length=None):
@@ -90,15 +117,15 @@ def get_session_timeout(social_user, enable_session_expiration=False, max_sessio
     return session_expiry
 
 
-def _do_login(backend, user, social_user):
+def _do_login(backend, user, social_user) -> None:
     user.backend = f"{backend.__module__}.{backend.__class__.__name__}"
     # Get these details early to avoid any issues involved in the
-    # session switch that happens when we call login().
+    # session switch that happens when we call login_user().
     enable_session_expiration = backend.setting("SESSION_EXPIRATION", False)
     max_session_length_setting = backend.setting("MAX_SESSION_LENGTH", None)
 
-    # Log the user in, creating a new session.
-    login(backend.strategy.request, user)
+    # Log the user in.
+    login_user(user)
 
     # Make sure that the max_session_length value is either an integer or
     # None. Because we get this as a setting from the backend, it can be set
@@ -120,8 +147,8 @@ def _do_login(backend, user, social_user):
 
     try:
         # Set the session length to our previously determined expiry length.
-        backend.strategy.request.session.set_expiry(session_expiry)
+        set_session_expiry(session_expiry)
     except OverflowError:
-        # The timestamp we used wasn't in the range of values supported by
-        # Django for session length; use the platform default. We tried.
-        backend.strategy.request.session.set_expiry(DEFAULT_SESSION_TIMEOUT)
+        # The timestamp we used wasn't in the range of values supported for
+        # a session length; use the platform default. We tried.
+        set_session_expiry(DEFAULT_SESSION_TIMEOUT)

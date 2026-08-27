@@ -14,11 +14,11 @@ into release. The error manifested as:
 The breaking change happened when:
 1. social-core's OpenIdStore.getAssociation() calls self.assoc.oids()
 2. AssociationMixin.oids() calls cls.get(**kwargs)
-3. If get() is not properly implemented in the Django storage layer, it raises NotImplementedError
+3. If get() is not properly implemented in the Flask storage layer, it raises NotImplementedError
 
 These integration tests ensure that:
-- DjangoAssociationMixin.get() works correctly and returns a QuerySet
-- DjangoAssociationMixin.oids() properly calls get() and converts results to OpenIdAssociation objects
+- FlaskAssociationMixin.get() works correctly and returns a QuerySet
+- FlaskAssociationMixin.oids() properly calls get() and converts results to OpenIdAssociation objects
 - OpenIdStore.getAssociation() can successfully retrieve associations through the full call stack
 - All OpenID association and nonce storage operations work end-to-end
 """
@@ -26,20 +26,26 @@ These integration tests ensure that:
 import time
 from unittest import mock
 
-from django.test import TestCase
+import pytest
 from social_core.store import OpenIdStore
 from social_core.strategy import BaseStrategy
 
-from social_django.models import Association, DjangoStorage, Nonce
+from social_flask.db import session as db_session
+from social_flask.models import Association, FlaskStorage, Nonce
 
 
-class TestStorageIntegration(TestCase):
-    """Test integration between DjangoStorage and social-core's OpenIdStore"""
+def count(model) -> int:
+    return db_session.query(model).count()
 
-    def setUp(self):
-        # Create a mock strategy with DjangoStorage
+
+class TestStorageIntegration:
+    """Test integration between FlaskStorage and social-core's OpenIdStore"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, app):
+        # Create a mock strategy with FlaskStorage
         self.strategy = mock.Mock(spec=BaseStrategy)
-        self.strategy.storage = DjangoStorage
+        self.strategy.storage = FlaskStorage
         self.store = OpenIdStore(self.strategy)
 
     def test_openid_store_association_workflow(self):
@@ -58,27 +64,27 @@ class TestStorageIntegration(TestCase):
         self.store.storeAssociation(server_url, mock_association)
 
         # Verify association was stored
-        self.assertEqual(Association.objects.count(), 1)
-        stored = Association.objects.first()
-        self.assertEqual(stored.server_url, server_url)
-        self.assertEqual(stored.handle, "test_handle")
+        assert count(Association) == 1
+        stored = Association.get().first()
+        assert stored.server_url == server_url
+        assert stored.handle == "test_handle"
 
         # Test getAssociation - this is the critical method that was breaking
         retrieved = self.store.getAssociation(server_url)
-        self.assertIsNotNone(retrieved)
-        self.assertEqual(retrieved.handle, "test_handle")
+        assert retrieved is not None
+        assert retrieved.handle == "test_handle"
 
         # Test getAssociation with handle
         retrieved_with_handle = self.store.getAssociation(server_url, "test_handle")
-        self.assertIsNotNone(retrieved_with_handle)
-        self.assertEqual(retrieved_with_handle.handle, "test_handle")
+        assert retrieved_with_handle is not None
+        assert retrieved_with_handle.handle == "test_handle"
 
         # Test removeAssociation
         self.store.removeAssociation(server_url, "test_handle")
-        self.assertEqual(Association.objects.count(), 0)
+        assert count(Association) == 0
 
         # Test getAssociation returns None after removal
-        self.assertIsNone(self.store.getAssociation(server_url))
+        assert self.store.getAssociation(server_url) is None
 
     def test_openid_store_association_expiration(self):
         """Test that expired associations are handled correctly"""
@@ -93,12 +99,12 @@ class TestStorageIntegration(TestCase):
         server_url = "https://example.com/openid"
 
         self.store.storeAssociation(server_url, mock_association)
-        self.assertEqual(Association.objects.count(), 1)
+        assert count(Association) == 1
 
         # getAssociation should return None for expired associations and clean them up
         retrieved = self.store.getAssociation(server_url)
-        self.assertIsNone(retrieved)
-        self.assertEqual(Association.objects.count(), 0)
+        assert retrieved is None
+        assert count(Association) == 0
 
     def test_openid_store_multiple_associations(self):
         """Test handling multiple associations for the same server"""
@@ -116,17 +122,17 @@ class TestStorageIntegration(TestCase):
 
             self.store.storeAssociation(server_url, mock_association)
 
-        self.assertEqual(Association.objects.count(), 3)
+        assert count(Association) == 3
 
         # getAssociation should return the most recent one
         retrieved = self.store.getAssociation(server_url)
-        self.assertIsNotNone(retrieved)
-        self.assertEqual(retrieved.handle, "handle_2")
+        assert retrieved is not None
+        assert retrieved.handle == "handle_2"
 
         # Get specific association by handle
         retrieved_specific = self.store.getAssociation(server_url, "handle_1")
-        self.assertIsNotNone(retrieved_specific)
-        self.assertEqual(retrieved_specific.handle, "handle_1")
+        assert retrieved_specific is not None
+        assert retrieved_specific.handle == "handle_1"
 
     def test_openid_store_nonce_workflow(self):
         """Test the OpenID nonce workflow through OpenIdStore"""
@@ -135,16 +141,16 @@ class TestStorageIntegration(TestCase):
         salt = "test_salt"
 
         # First use should succeed
-        self.assertTrue(self.store.useNonce(server_url, timestamp, salt))
-        self.assertEqual(Nonce.objects.count(), 1)
+        assert self.store.useNonce(server_url, timestamp, salt) is True
+        assert count(Nonce) == 1
 
         # Second use with same parameters should fail (nonce already used)
-        self.assertFalse(self.store.useNonce(server_url, timestamp, salt))
-        self.assertEqual(Nonce.objects.count(), 1)
+        assert self.store.useNonce(server_url, timestamp, salt) is False
+        assert count(Nonce) == 1
 
         # Different salt should succeed
-        self.assertTrue(self.store.useNonce(server_url, timestamp, "different_salt"))
-        self.assertEqual(Nonce.objects.count(), 2)
+        assert self.store.useNonce(server_url, timestamp, "different_salt") is True
+        assert count(Nonce) == 2
 
     def test_openid_store_nonce_timestamp_skew(self):
         """Test that nonces with excessive timestamp skew are rejected"""
@@ -154,12 +160,13 @@ class TestStorageIntegration(TestCase):
         salt = "test_salt"
 
         # Old timestamp should be rejected
-        self.assertFalse(self.store.useNonce(server_url, old_timestamp, salt))
-        self.assertEqual(Nonce.objects.count(), 0)
+        assert self.store.useNonce(server_url, old_timestamp, salt) is False
+        assert count(Nonce) == 0
 
 
-class TestAssociationMixinIntegration(TestCase):
-    """Test DjangoAssociationMixin methods used by social-core"""
+@pytest.mark.usefixtures("app")
+class TestAssociationMixinIntegration:
+    """Test FlaskAssociationMixin methods used by social-core"""
 
     def test_oids_method(self):
         """Test the oids method that is called by OpenIdStore.getAssociation"""
@@ -173,11 +180,11 @@ class TestAssociationMixinIntegration(TestCase):
 
         # Test oids() method - returns sorted list of (id, association) tuples
         oids_result = list(Association.oids(server_url))
-        self.assertEqual(len(oids_result), 2)
+        assert len(oids_result) == 2
 
         # Should be sorted by issued timestamp (most recent first)
-        self.assertEqual(oids_result[0][1].handle, "handle2")
-        self.assertEqual(oids_result[1][1].handle, "handle1")
+        assert oids_result[0][1].handle == "handle2"
+        assert oids_result[1][1].handle == "handle1"
 
     def test_oids_method_with_handle(self):
         """Test oids method with specific handle filter"""
@@ -190,8 +197,8 @@ class TestAssociationMixinIntegration(TestCase):
 
         # Test oids() with handle filter
         oids_result = list(Association.oids(server_url, "handle1"))
-        self.assertEqual(len(oids_result), 1)
-        self.assertEqual(oids_result[0][1].handle, "handle1")
+        assert len(oids_result) == 1
+        assert oids_result[0][1].handle == "handle1"
 
     def test_get_method(self):
         """Test the get method that is called by oids"""
@@ -202,22 +209,23 @@ class TestAssociationMixinIntegration(TestCase):
         server_url = "https://example.com/openid"
         Association.store(server_url, mock_assoc)
 
-        # Test get() method returns QuerySet
+        # Test get() method returns a QuerySet
         result = Association.get(server_url=server_url)
-        self.assertEqual(result.count(), 1)
-        self.assertEqual(result.first().handle, "test_handle")
+        assert result.count() == 1
+        assert result.first().handle == "test_handle"
 
         # Test get() with handle filter
         result_with_handle = Association.get(server_url=server_url, handle="test_handle")
-        self.assertEqual(result_with_handle.count(), 1)
+        assert result_with_handle.count() == 1
 
         # Test get() with non-existent handle
         result_none = Association.get(server_url=server_url, handle="nonexistent")
-        self.assertEqual(result_none.count(), 0)
+        assert result_none.count() == 0
 
 
-class TestNonceMixinIntegration(TestCase):
-    """Test DjangoNonceMixin methods used by social-core"""
+@pytest.mark.usefixtures("app")
+class TestNonceMixinIntegration:
+    """Test FlaskNonceMixin methods used by social-core"""
 
     def test_use_method(self):
         """Test the use method that is called by OpenIdStore.useNonce"""
@@ -226,12 +234,12 @@ class TestNonceMixinIntegration(TestCase):
         salt = "test_salt"
 
         # First use should return True (created)
-        self.assertTrue(Nonce.use(server_url, timestamp, salt))
-        self.assertEqual(Nonce.objects.count(), 1)
+        assert Nonce.use(server_url, timestamp, salt) is True
+        assert count(Nonce) == 1
 
         # Second use should return False (already exists)
-        self.assertFalse(Nonce.use(server_url, timestamp, salt))
-        self.assertEqual(Nonce.objects.count(), 1)
+        assert Nonce.use(server_url, timestamp, salt) is False
+        assert count(Nonce) == 1
 
     def test_get_method(self):
         """Test the get method for retrieving nonces"""
@@ -243,9 +251,9 @@ class TestNonceMixinIntegration(TestCase):
 
         # Test get() method
         nonce = Nonce.get(server_url, salt)
-        self.assertIsNotNone(nonce)
-        self.assertEqual(nonce.server_url, server_url)
-        self.assertEqual(nonce.salt, salt)
+        assert nonce is not None
+        assert nonce.server_url == server_url
+        assert nonce.salt == salt
 
     def test_delete_method(self):
         """Test the delete method for nonces"""
@@ -258,4 +266,4 @@ class TestNonceMixinIntegration(TestCase):
 
         # Test delete() method
         Nonce.delete(nonce)
-        self.assertEqual(Nonce.objects.count(), 0)
+        assert count(Nonce) == 0
